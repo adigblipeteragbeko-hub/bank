@@ -41,12 +41,31 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined
   });
 
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
   if (!res.ok) {
-    throw new Error(data.error || "Request failed.");
+    const fallback = text && !text.trim().startsWith("<") ? text.trim() : "";
+    throw new Error(data.error || fallback || `Request failed (${res.status}).`);
   }
 
   return data;
+}
+
+function normalizeStatus(user) {
+  if (!user) return "active";
+  if (user.accountStatus) return user.accountStatus;
+  if (typeof user.isActive === "boolean") return user.isActive ? "active" : "blocked";
+  return "active";
+}
+
+function normalizeUser(user) {
+  if (!user) return user;
+  return { ...user, accountStatus: normalizeStatus(user) };
 }
 
 function logout() {
@@ -64,6 +83,7 @@ async function loadAppData() {
   ]);
 
   state.user = me.user;
+  state.user = normalizeUser(state.user);
   state.users = users.users;
   state.transactions = transactions.transactions;
 
@@ -72,7 +92,7 @@ async function loadAppData() {
       api("/admin/users"),
       api("/admin/transactions")
     ]);
-    state.adminUsers = adminUsers.users;
+    state.adminUsers = adminUsers.users.map(normalizeUser);
     state.adminTransactions = adminTx.transactions;
   }
 }
