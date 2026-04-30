@@ -1,0 +1,366 @@
+﻿const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const Database = require("better-sqlite3");
+
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || "change-this-in-production";
+const DB_FILE = process.env.DB_FILE || "bank.db";
+
+const db = new Database(DB_FILE);
+db.pragma("journal_mode = WAL");
+
+function uid(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function initDb() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      full_name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('user','admin')),
+      balance REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS transactions (
+      id TEXT PRIMARY KEY,
+      from_user_id TEXT NOT NULL,
+      to_user_id TEXT NOT NULL,
+      amount REAL NOT NULL CHECK(amount > 0),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(from_user_id) REFERENCES users(id),
+      FOREIGN KEY(to_user_id) REFERENCES users(id)
+    );
+  `);
+
+  const adminEmail = "admin@bank.local";
+  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(adminEmail);
+  if (!existing) {
+    const admin = {
+      id: uid("usr"),
+      full_name: "System Admin",
+      email: adminEmail,
+      password_hash: bcrypt.hashSync("admin123", 10),
+      role: "admin",
+      balance: 5000,
+      created_at: new Date().toISOString()
+    };
+
+    db.prepare(
+      `INSERT INTO users (id, full_name, email, password_hash, role, balance, created_at)
+       VALUES (@id, @full_name, @email, @password_hash, @role, @balance, @created_at)`
+    ).run(admin);
+  }
+}
+
+initDb();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+function signToken(user) {
+  return jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET, { expiresIn: "8h" });
+}
+
+function auth(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: "Missing token." });
+  }
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = db
+      .prepare("SELECT id, full_name, email, role, balance, created_at FROM users WHERE id = ?")
+      .get(payload.sub);
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid session." });
+    }
+
+    req.user = user;
+    next();
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token." });
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin access required." });
+  }
+  next();
+}
+
+app.post("/api/auth/register", (req, res) => {
+  const fullName = String(req.body.fullName || "").trim();
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+
+  if (!fullName || !email || password.length < 6) {
+    return res.status(400).json({ error: "Invalid registration details." });
+  }
+
+  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
+  if (existing) {
+    return res.status(409).json({ error: "Email is already registered." });
+  }
+
+  const user = {
+    id: uid("usr"),
+    full_name: fullName,
+    email,
+    password_hash: bcrypt.hashSync(password, 10),
+    role: "user",
+    balance: 1000,
+    created_at: new Date().toISOString()
+  };
+
+  db.prepare(
+    `INSERT INTO users (id, full_name, email, password_hash, role, balance, created_at)
+     VALUES (@id, @full_name, @email, @password_hash, @role, @balance, @created_at)`
+  ).run(user);
+
+  const safeUser = {
+    id: user.id,
+    fullName: user.full_name,
+    email: user.email,
+    role: user.role,
+    balance: user.balance,
+    createdAt: user.created_at
+  };
+
+  return res.status(201).json({ token: signToken(user), user: safeUser });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+
+  const row = db
+    .prepare("SELECT id, full_name, email, password_hash, role, balance, created_at FROM users WHERE email = ?")
+    .get(email);
+
+  if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+    return res.status(401).json({ error: "Invalid login credentials." });
+  }
+
+  const safeUser = {
+    id: row.id,
+    fullName: row.full_name,
+    email: row.email,
+    role: row.role,
+    balance: row.balance,
+    createdAt: row.created_at
+  };
+
+  return res.json({ token: signToken(row), user: safeUser });
+});
+
+app.get("/api/me", auth, (req, res) => {
+  const user = db
+    .prepare("SELECT id, full_name, email, role, balance, created_at FROM users WHERE id = ?")
+    .get(req.user.id);
+
+  return res.json({
+    user: {
+      id: user.id,
+      fullName: user.full_name,
+      email: user.email,
+      role: user.role,
+      balance: user.balance,
+      createdAt: user.created_at
+    }
+  });
+});
+
+app.put("/api/me", auth, (req, res) => {
+  const fullName = String(req.body.fullName || "").trim();
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const newPassword = String(req.body.password || "").trim();
+
+  if (!fullName || !email) {
+    return res.status(400).json({ error: "Name and email are required." });
+  }
+
+  const duplicate = db.prepare("SELECT id FROM users WHERE email = ? AND id <> ?").get(email, req.user.id);
+  if (duplicate) {
+    return res.status(409).json({ error: "Email is already used by another account." });
+  }
+
+  if (newPassword) {
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    }
+    db.prepare(
+      "UPDATE users SET full_name = ?, email = ?, password_hash = ? WHERE id = ?"
+    ).run(fullName, email, bcrypt.hashSync(newPassword, 10), req.user.id);
+  } else {
+    db.prepare("UPDATE users SET full_name = ?, email = ? WHERE id = ?").run(fullName, email, req.user.id);
+  }
+
+  const user = db
+    .prepare("SELECT id, full_name, email, role, balance, created_at FROM users WHERE id = ?")
+    .get(req.user.id);
+
+  return res.json({
+    user: {
+      id: user.id,
+      fullName: user.full_name,
+      email: user.email,
+      role: user.role,
+      balance: user.balance,
+      createdAt: user.created_at
+    }
+  });
+});
+
+app.get("/api/users", auth, (req, res) => {
+  const users = db
+    .prepare("SELECT id, full_name, email FROM users WHERE id <> ? ORDER BY created_at DESC")
+    .all(req.user.id)
+    .map((u) => ({ id: u.id, fullName: u.full_name, email: u.email }));
+
+  return res.json({ users });
+});
+
+app.post("/api/transfers", auth, (req, res) => {
+  const toUserId = String(req.body.toUserId || "").trim();
+  const amount = Number(req.body.amount);
+
+  if (!toUserId || !Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Invalid transfer details." });
+  }
+
+  if (toUserId === req.user.id) {
+    return res.status(400).json({ error: "Cannot transfer to your own account." });
+  }
+
+  const fromUser = db.prepare("SELECT id, balance FROM users WHERE id = ?").get(req.user.id);
+  const toUser = db.prepare("SELECT id, email FROM users WHERE id = ?").get(toUserId);
+
+  if (!toUser) {
+    return res.status(404).json({ error: "Recipient not found." });
+  }
+
+  if (fromUser.balance < amount) {
+    return res.status(400).json({ error: "Insufficient balance." });
+  }
+
+  const transfer = db.transaction(() => {
+    db.prepare("UPDATE users SET balance = balance - ? WHERE id = ?").run(amount, req.user.id);
+    db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(amount, toUserId);
+    db.prepare(
+      "INSERT INTO transactions (id, from_user_id, to_user_id, amount, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(uid("tx"), req.user.id, toUserId, amount, new Date().toISOString());
+  });
+
+  transfer();
+
+  const refreshed = db.prepare("SELECT balance FROM users WHERE id = ?").get(req.user.id);
+
+  return res.status(201).json({
+    message: `Transferred $${amount.toFixed(2)} to ${toUser.email}.`,
+    balance: refreshed.balance
+  });
+});
+
+app.get("/api/transactions", auth, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT t.id, t.from_user_id, t.to_user_id, t.amount, t.created_at,
+              f.email AS from_email, to_u.email AS to_email
+       FROM transactions t
+       JOIN users f ON f.id = t.from_user_id
+       JOIN users to_u ON to_u.id = t.to_user_id
+       WHERE t.from_user_id = ? OR t.to_user_id = ?
+       ORDER BY t.created_at DESC`
+    )
+    .all(req.user.id, req.user.id);
+
+  return res.json({
+    transactions: rows.map((t) => ({
+      id: t.id,
+      fromUserId: t.from_user_id,
+      toUserId: t.to_user_id,
+      fromEmail: t.from_email,
+      toEmail: t.to_email,
+      amount: t.amount,
+      createdAt: t.created_at
+    }))
+  });
+});
+
+app.get("/api/admin/users", auth, requireAdmin, (req, res) => {
+  const users = db
+    .prepare("SELECT id, full_name, email, role, balance, created_at FROM users ORDER BY created_at DESC")
+    .all()
+    .map((u) => ({
+      id: u.id,
+      fullName: u.full_name,
+      email: u.email,
+      role: u.role,
+      balance: u.balance,
+      createdAt: u.created_at
+    }));
+
+  return res.json({ users });
+});
+
+app.put("/api/admin/users/:id/balance", auth, requireAdmin, (req, res) => {
+  const userId = String(req.params.id || "").trim();
+  const balance = Number(req.body.balance);
+
+  if (!Number.isFinite(balance) || balance < 0) {
+    return res.status(400).json({ error: "Balance must be a non-negative number." });
+  }
+
+  const found = db.prepare("SELECT id, email FROM users WHERE id = ?").get(userId);
+  if (!found) {
+    return res.status(404).json({ error: "User not found." });
+  }
+
+  db.prepare("UPDATE users SET balance = ? WHERE id = ?").run(balance, userId);
+
+  return res.json({ message: `Balance updated for ${found.email}.` });
+});
+
+app.get("/api/admin/transactions", auth, requireAdmin, (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT t.id, t.amount, t.created_at, f.email AS from_email, to_u.email AS to_email
+       FROM transactions t
+       JOIN users f ON f.id = t.from_user_id
+       JOIN users to_u ON to_u.id = t.to_user_id
+       ORDER BY t.created_at DESC`
+    )
+    .all();
+
+  return res.json({
+    transactions: rows.map((r) => ({
+      id: r.id,
+      amount: r.amount,
+      createdAt: r.created_at,
+      fromEmail: r.from_email,
+      toEmail: r.to_email
+    }))
+  });
+});
+
+app.use(express.static(path.join(__dirname, "public")));
+app.get(/.*/, (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+app.listen(PORT, () => {
+  console.log(`Bank app running on http://localhost:${PORT}`);
+});
