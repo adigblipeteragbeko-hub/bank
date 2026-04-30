@@ -373,6 +373,7 @@ function profileView() {
 }
 
 function adminView() {
+  const deletableUsers = state.adminUsers.filter((u) => u.id !== state.user.id);
   return `
     <h2>Admin Panel</h2>
     <p class="muted">Manage users and inspect all transfers.</p>
@@ -440,16 +441,20 @@ function adminView() {
     </form>
 
     <h3 style="margin-top:16px;">Delete User</h3>
-    <form id="admin-delete-form" class="form-grid">
-      <div>
-        <label>User</label>
-        <select name="userId" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
-          ${state.adminUsers.map((u) => `<option value="${u.id}">${u.fullName} (${u.email})</option>`).join("")}
-        </select>
-      </div>
-      <button class="btn danger" type="submit">Delete User</button>
-      <div id="admin-delete-msg"></div>
-    </form>
+    ${deletableUsers.length === 0 ? `
+      <p class="muted">No deletable users available. You cannot delete your own admin account.</p>
+    ` : `
+      <form id="admin-delete-form" class="form-grid">
+        <div>
+          <label>User</label>
+          <select name="userId" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+            ${deletableUsers.map((u) => `<option value="${u.id}">${u.fullName} (${u.email})</option>`).join("")}
+          </select>
+        </div>
+        <button class="btn danger" type="submit">Delete User</button>
+        <div id="admin-delete-msg"></div>
+      </form>
+    `}
 
     <h3 style="margin-top:16px;">All Transactions</h3>
     <div class="table-wrap">
@@ -583,7 +588,13 @@ async function bindEvents() {
       msg.textContent = "";
       if (!window.confirm("Are you sure you want to permanently delete this user?")) return;
       try {
-        await api(`/admin/users/${String(data.get("userId") || "")}`, { method: "DELETE" });
+        const targetId = String(data.get("userId") || "");
+        if (targetId === state.user.id) {
+          msg.className = "error";
+          msg.textContent = "You cannot delete your own admin account.";
+          return;
+        }
+        await api(`/admin/users/${targetId}`, { method: "DELETE" });
         await render();
       } catch (err) {
         msg.className = "error";
