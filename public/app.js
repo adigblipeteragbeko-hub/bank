@@ -108,6 +108,7 @@ function renderAuth() {
     <div class="row">
       <button class="btn" id="show-login">Login</button>
       <button class="btn secondary" id="show-register">Register</button>
+      <button class="btn secondary" id="show-verify">Verify Code</button>
     </div>
     <div id="auth-form" style="margin-top: 14px;"></div>
   `;
@@ -219,8 +220,43 @@ function renderAuth() {
     });
   };
 
+  const showVerify = () => {
+    formHost.innerHTML = `
+      <form id="verify-form" class="form-grid">
+        <div><label>Email</label><input type="email" name="email" required /></div>
+        <div><label>Verification Code</label><input name="code" required /></div>
+        <button class="btn" type="submit">Verify & Create Account</button>
+        <div id="verify-msg"></div>
+      </form>
+    `;
+
+    document.getElementById("verify-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      const msg = document.getElementById("verify-msg");
+      msg.textContent = "";
+      try {
+        const result = await api("/auth/verify", {
+          method: "POST",
+          body: {
+            email: String(data.get("email") || "").trim(),
+            code: String(data.get("code") || "").trim()
+          }
+        });
+        state.token = result.token;
+        localStorage.setItem(TOKEN_KEY, result.token);
+        state.activeTab = "dashboard";
+        await render();
+      } catch (err) {
+        msg.className = "error";
+        msg.textContent = err.message;
+      }
+    });
+  };
+
   document.getElementById("show-login").addEventListener("click", showLogin);
   document.getElementById("show-register").addEventListener("click", showRegister);
+  document.getElementById("show-verify").addEventListener("click", showVerify);
   showLogin();
 }
 
