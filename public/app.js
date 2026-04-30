@@ -90,7 +90,6 @@ function renderAuth() {
       <button class="btn secondary" id="show-register">Register</button>
     </div>
     <div id="auth-form" style="margin-top: 14px;"></div>
-    <p class="muted" style="margin-top: 16px;">Seeded admin: admin@bank.local / admin123</p>
   `;
 
   const formHost = document.getElementById("auth-form");

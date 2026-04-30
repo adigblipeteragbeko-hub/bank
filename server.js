@@ -13,6 +13,8 @@ const JWT_SECRET = process.env.JWT_SECRET || "change-this-in-production";
 const DB_FILE = process.env.DB_FILE || "bank.db";
 const EMAIL_USER = process.env.EMAIL_USER || "";
 const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD || "";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@bank.local";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
 
 const db = new Database(DB_FILE);
 db.pragma("journal_mode = WAL");
@@ -76,16 +78,17 @@ function initDb() {
     db.exec("UPDATE users SET account_status = CASE WHEN is_active = 1 THEN 'active' ELSE 'blocked' END");
   }
 
-  const adminEmail = "admin@bank.local";
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(adminEmail);
+  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(ADMIN_EMAIL);
+  const adminPasswordHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
   if (!existing) {
     const admin = {
       id: uid("usr"),
       full_name: "System Admin",
-      email: adminEmail,
-      password_hash: bcrypt.hashSync("admin123", 10),
+      email: ADMIN_EMAIL,
+      password_hash: adminPasswordHash,
       role: "admin",
       is_active: 1,
+      account_status: "active",
       balance: 5000,
       created_at: new Date().toISOString()
     };
@@ -94,6 +97,11 @@ function initDb() {
       `INSERT INTO users (id, full_name, email, password_hash, role, balance, created_at)
        VALUES (@id, @full_name, @email, @password_hash, @role, @balance, @created_at)`
     ).run(admin);
+  } else {
+    // Keep seeded admin recoverable for local development.
+    db.prepare(
+      "UPDATE users SET role = 'admin', is_active = 1, account_status = 'active', password_hash = ? WHERE email = ?"
+    ).run(adminPasswordHash, ADMIN_EMAIL);
   }
 }
 
