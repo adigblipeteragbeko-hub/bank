@@ -137,8 +137,14 @@ function renderAuth() {
         <div><label>Full Name</label><input name="fullName" required /></div>
         <div><label>Email</label><input type="email" name="email" required /></div>
         <div><label>Password</label><input type="password" name="password" required minlength="6" /></div>
-        <button class="btn secondary" type="submit">Create Account</button>
+        <button class="btn secondary" type="submit">Send Verification Code</button>
         <div id="register-msg"></div>
+      </form>
+      <form id="verify-form" class="form-grid" style="margin-top:12px;">
+        <div><label>Email</label><input type="email" name="email" required /></div>
+        <div><label>Verification Code</label><input name="code" required /></div>
+        <button class="btn" type="submit">Verify & Create Account</button>
+        <div id="verify-msg"></div>
       </form>
     `;
 
@@ -149,12 +155,37 @@ function renderAuth() {
       msg.textContent = "";
 
       try {
-        const result = await api("/auth/register", {
+        const email = String(data.get("email") || "").trim();
+        await api("/auth/register", {
           method: "POST",
           body: {
             fullName: String(data.get("fullName") || "").trim(),
-            email: String(data.get("email") || "").trim(),
+            email,
             password: String(data.get("password") || "")
+          }
+        });
+
+        msg.className = "notice";
+        msg.textContent = "Verification code sent. Check your email, then verify below.";
+        document.querySelector("#verify-form input[name='email']").value = email;
+      } catch (err) {
+        msg.className = "error";
+        msg.textContent = err.message;
+      }
+    });
+
+    document.getElementById("verify-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      const msg = document.getElementById("verify-msg");
+      msg.textContent = "";
+
+      try {
+        const result = await api("/auth/verify", {
+          method: "POST",
+          body: {
+            email: String(data.get("email") || "").trim(),
+            code: String(data.get("code") || "").trim()
           }
         });
 

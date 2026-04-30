@@ -1,19 +1,35 @@
-﻿const express = require("express");
+﻿require("dotenv").config();
+
+const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const Database = require("better-sqlite3");
+const nodemailer = require("nodemailer");
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-in-production";
 const DB_FILE = process.env.DB_FILE || "bank.db";
+const EMAIL_USER = process.env.EMAIL_USER || "";
+const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD || "";
 
 const db = new Database(DB_FILE);
 db.pragma("journal_mode = WAL");
 
+const mailer = EMAIL_USER && EMAIL_APP_PASSWORD
+  ? nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: EMAIL_USER, pass: EMAIL_APP_PASSWORD }
+    })
+  : null;
+
 function uid(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function createOtpCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 function initDb() {
@@ -36,6 +52,15 @@ function initDb() {
       created_at TEXT NOT NULL,
       FOREIGN KEY(from_user_id) REFERENCES users(id),
       FOREIGN KEY(to_user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS pending_users (
+      email TEXT PRIMARY KEY,
+      full_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      verification_code_hash TEXT NOT NULL,
+      code_expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
   `);
 
@@ -101,7 +126,20 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-app.post("/api/auth/register", (req, res) => {
+async function sendVerificationEmail(email, fullName, code) {
+  if (!mailer) {
+    throw new Error("Email service is not configured. Set EMAIL_USER and EMAIL_APP_PASSWORD in .env.");
+  }
+
+  await mailer.sendMail({
+    from: `Bank App <${EMAIL_USER}>`,
+    to: email,
+    subject: "Your Bank verification code",
+    text: `Hi ${fullName}, your verification code is ${code}. It expires in 10 minutes.`
+  });
+}
+
+app.post("/api/auth/register", async (req, res) => {
   const fullName = String(req.body.fullName || "").trim();
   const email = String(req.body.email || "").trim().toLowerCase();
   const password = String(req.body.password || "");
@@ -115,20 +153,82 @@ app.post("/api/auth/register", (req, res) => {
     return res.status(409).json({ error: "Email is already registered." });
   }
 
+  const code = createOtpCode();
+  const codeExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  db.prepare(
+    `INSERT INTO pending_users (email, full_name, password_hash, verification_code_hash, code_expires_at, created_at)
+     VALUES (@email, @full_name, @password_hash, @verification_code_hash, @code_expires_at, @created_at)
+     ON CONFLICT(email) DO UPDATE SET
+       full_name = excluded.full_name,
+       password_hash = excluded.password_hash,
+       verification_code_hash = excluded.verification_code_hash,
+       code_expires_at = excluded.code_expires_at,
+       created_at = excluded.created_at`
+  ).run({
+    email,
+    full_name: fullName,
+    password_hash: bcrypt.hashSync(password, 10),
+    verification_code_hash: bcrypt.hashSync(code, 10),
+    code_expires_at: codeExpiresAt,
+    created_at: new Date().toISOString()
+  });
+
+  try {
+    await sendVerificationEmail(email, fullName, code);
+    return res.status(202).json({ message: "Verification code sent to your email." });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Failed to send verification email." });
+  }
+});
+
+app.post("/api/auth/verify", (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const code = String(req.body.code || "").trim();
+
+  if (!email || !code) {
+    return res.status(400).json({ error: "Email and code are required." });
+  }
+
+  const pending = db
+    .prepare("SELECT email, full_name, password_hash, verification_code_hash, code_expires_at FROM pending_users WHERE email = ?")
+    .get(email);
+
+  if (!pending) {
+    return res.status(404).json({ error: "No pending registration for this email." });
+  }
+
+  if (new Date(pending.code_expires_at).getTime() < Date.now()) {
+    return res.status(400).json({ error: "Verification code expired. Please register again." });
+  }
+
+  if (!bcrypt.compareSync(code, pending.verification_code_hash)) {
+    return res.status(400).json({ error: "Invalid verification code." });
+  }
+
+  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
+  if (existing) {
+    db.prepare("DELETE FROM pending_users WHERE email = ?").run(email);
+    return res.status(409).json({ error: "Email is already registered." });
+  }
+
   const user = {
     id: uid("usr"),
-    full_name: fullName,
-    email,
-    password_hash: bcrypt.hashSync(password, 10),
+    full_name: pending.full_name,
+    email: pending.email,
+    password_hash: pending.password_hash,
     role: "user",
     balance: 1000,
     created_at: new Date().toISOString()
   };
 
-  db.prepare(
-    `INSERT INTO users (id, full_name, email, password_hash, role, balance, created_at)
-     VALUES (@id, @full_name, @email, @password_hash, @role, @balance, @created_at)`
-  ).run(user);
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO users (id, full_name, email, password_hash, role, balance, created_at)
+       VALUES (@id, @full_name, @email, @password_hash, @role, @balance, @created_at)`
+    ).run(user);
+    db.prepare("DELETE FROM pending_users WHERE email = ?").run(email);
+  })();
 
   const safeUser = {
     id: user.id,
@@ -201,9 +301,8 @@ app.put("/api/me", auth, (req, res) => {
     if (newPassword.length < 6) {
       return res.status(400).json({ error: "Password must be at least 6 characters." });
     }
-    db.prepare(
-      "UPDATE users SET full_name = ?, email = ?, password_hash = ? WHERE id = ?"
-    ).run(fullName, email, bcrypt.hashSync(newPassword, 10), req.user.id);
+    db.prepare("UPDATE users SET full_name = ?, email = ?, password_hash = ? WHERE id = ?")
+      .run(fullName, email, bcrypt.hashSync(newPassword, 10), req.user.id);
   } else {
     db.prepare("UPDATE users SET full_name = ?, email = ? WHERE id = ?").run(fullName, email, req.user.id);
   }
@@ -259,9 +358,8 @@ app.post("/api/transfers", auth, (req, res) => {
   const transfer = db.transaction(() => {
     db.prepare("UPDATE users SET balance = balance - ? WHERE id = ?").run(amount, req.user.id);
     db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(amount, toUserId);
-    db.prepare(
-      "INSERT INTO transactions (id, from_user_id, to_user_id, amount, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(uid("tx"), req.user.id, toUserId, amount, new Date().toISOString());
+    db.prepare("INSERT INTO transactions (id, from_user_id, to_user_id, amount, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(uid("tx"), req.user.id, toUserId, amount, new Date().toISOString());
   });
 
   transfer();
