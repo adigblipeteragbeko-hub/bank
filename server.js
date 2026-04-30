@@ -41,6 +41,7 @@ function initDb() {
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('user','admin')),
       is_active INTEGER NOT NULL DEFAULT 1,
+      account_status TEXT NOT NULL DEFAULT 'active',
       balance REAL NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
@@ -66,8 +67,13 @@ function initDb() {
   `);
   const userColumns = db.prepare("PRAGMA table_info(users)").all();
   const hasIsActive = userColumns.some((col) => col.name === "is_active");
+  const hasAccountStatus = userColumns.some((col) => col.name === "account_status");
   if (!hasIsActive) {
     db.exec("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!hasAccountStatus) {
+    db.exec("ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'");
+    db.exec("UPDATE users SET account_status = CASE WHEN is_active = 1 THEN 'active' ELSE 'blocked' END");
   }
 
   const adminEmail = "admin@bank.local";
@@ -112,14 +118,14 @@ function auth(req, res, next) {
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     const user = db
-      .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users WHERE id = ?")
+      .prepare("SELECT id, full_name, email, role, account_status, balance, created_at FROM users WHERE id = ?")
       .get(payload.sub);
 
     if (!user) {
       return res.status(401).json({ error: "Invalid session." });
     }
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Your account is inactive. Contact admin." });
+    if (user.account_status === "blocked") {
+      return res.status(403).json({ error: "Your account is blocked. Contact admin." });
     }
 
     req.user = user;
@@ -134,6 +140,18 @@ function requireAdmin(req, res, next) {
     return res.status(403).json({ error: "Admin access required." });
   }
   next();
+}
+
+function assertOperationalAccount(user, res) {
+  if (user.account_status === "frozen") {
+    res.status(403).json({ error: "Your account is frozen. Contact admin." });
+    return false;
+  }
+  if (user.account_status === "blocked") {
+    res.status(403).json({ error: "Your account is blocked. Contact admin." });
+    return false;
+  }
+  return true;
 }
 
 async function sendVerificationEmail(email, fullName, code) {
@@ -258,14 +276,14 @@ app.post("/api/auth/login", (req, res) => {
   const password = String(req.body.password || "");
 
   const row = db
-    .prepare("SELECT id, full_name, email, password_hash, role, is_active, balance, created_at FROM users WHERE email = ?")
+    .prepare("SELECT id, full_name, email, password_hash, role, account_status, balance, created_at FROM users WHERE email = ?")
     .get(email);
 
   if (!row || !bcrypt.compareSync(password, row.password_hash)) {
     return res.status(401).json({ error: "Invalid login credentials." });
   }
-  if (!row.is_active) {
-    return res.status(403).json({ error: "Your account is inactive. Contact admin." });
+  if (row.account_status === "blocked") {
+    return res.status(403).json({ error: "Your account is blocked. Contact admin." });
   }
 
   const safeUser = {
@@ -282,7 +300,7 @@ app.post("/api/auth/login", (req, res) => {
 
 app.get("/api/me", auth, (req, res) => {
   const user = db
-    .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, full_name, email, role, account_status, balance, created_at FROM users WHERE id = ?")
     .get(req.user.id);
 
   return res.json({
@@ -291,7 +309,7 @@ app.get("/api/me", auth, (req, res) => {
       fullName: user.full_name,
       email: user.email,
       role: user.role,
-      isActive: Boolean(user.is_active),
+      accountStatus: user.account_status,
       balance: user.balance,
       createdAt: user.created_at
     }
@@ -299,6 +317,7 @@ app.get("/api/me", auth, (req, res) => {
 });
 
 app.put("/api/me", auth, (req, res) => {
+  if (!assertOperationalAccount(req.user, res)) return;
   const fullName = String(req.body.fullName || "").trim();
   const email = String(req.body.email || "").trim().toLowerCase();
   const newPassword = String(req.body.password || "").trim();
@@ -323,7 +342,7 @@ app.put("/api/me", auth, (req, res) => {
   }
 
   const user = db
-    .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, full_name, email, role, account_status, balance, created_at FROM users WHERE id = ?")
     .get(req.user.id);
 
   return res.json({
@@ -332,7 +351,7 @@ app.put("/api/me", auth, (req, res) => {
       fullName: user.full_name,
       email: user.email,
       role: user.role,
-      isActive: Boolean(user.is_active),
+      accountStatus: user.account_status,
       balance: user.balance,
       createdAt: user.created_at
     }
@@ -349,6 +368,7 @@ app.get("/api/users", auth, (req, res) => {
 });
 
 app.post("/api/transfers", auth, (req, res) => {
+  if (!assertOperationalAccount(req.user, res)) return;
   const toUserId = String(req.body.toUserId || "").trim();
   const amount = Number(req.body.amount);
 
@@ -361,13 +381,13 @@ app.post("/api/transfers", auth, (req, res) => {
   }
 
   const fromUser = db.prepare("SELECT id, balance FROM users WHERE id = ?").get(req.user.id);
-  const toUser = db.prepare("SELECT id, email, is_active FROM users WHERE id = ?").get(toUserId);
+  const toUser = db.prepare("SELECT id, email, account_status FROM users WHERE id = ?").get(toUserId);
 
   if (!toUser) {
     return res.status(404).json({ error: "Recipient not found." });
   }
-  if (!toUser.is_active) {
-    return res.status(400).json({ error: "Recipient account is inactive." });
+  if (toUser.account_status !== "active") {
+    return res.status(400).json({ error: `Recipient account is ${toUser.account_status}.` });
   }
 
   if (fromUser.balance < amount) {
@@ -419,14 +439,14 @@ app.get("/api/transactions", auth, (req, res) => {
 
 app.get("/api/admin/users", auth, requireAdmin, (req, res) => {
   const users = db
-    .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users ORDER BY created_at DESC")
+    .prepare("SELECT id, full_name, email, role, account_status, balance, created_at FROM users ORDER BY created_at DESC")
     .all()
     .map((u) => ({
       id: u.id,
       fullName: u.full_name,
       email: u.email,
       role: u.role,
-      isActive: Boolean(u.is_active),
+      accountStatus: u.account_status,
       balance: u.balance,
       createdAt: u.created_at
     }));
@@ -468,14 +488,18 @@ app.put("/api/admin/users/:id/role", auth, requireAdmin, (req, res) => {
 
 app.put("/api/admin/users/:id/status", auth, requireAdmin, (req, res) => {
   const userId = String(req.params.id || "").trim();
-  const isActive = req.body.isActive ? 1 : 0;
+  const accountStatus = String(req.body.accountStatus || "").trim();
+  if (!["active", "frozen", "blocked"].includes(accountStatus)) {
+    return res.status(400).json({ error: "Status must be active, frozen, or blocked." });
+  }
   const found = db.prepare("SELECT id, email FROM users WHERE id = ?").get(userId);
   if (!found) return res.status(404).json({ error: "User not found." });
-  if (req.user.id === userId && !isActive) {
-    return res.status(400).json({ error: "You cannot deactivate your own admin account." });
+  if (req.user.id === userId && accountStatus !== "active") {
+    return res.status(400).json({ error: "You cannot freeze or block your own admin account." });
   }
-  db.prepare("UPDATE users SET is_active = ? WHERE id = ?").run(isActive, userId);
-  return res.json({ message: `${found.email} is now ${isActive ? "active" : "inactive"}.` });
+  const isActive = accountStatus === "blocked" ? 0 : 1;
+  db.prepare("UPDATE users SET account_status = ?, is_active = ? WHERE id = ?").run(accountStatus, isActive, userId);
+  return res.json({ message: `${found.email} is now ${accountStatus}.` });
 });
 
 app.delete("/api/admin/users/:id", auth, requireAdmin, (req, res) => {

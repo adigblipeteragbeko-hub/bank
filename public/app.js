@@ -207,10 +207,14 @@ function renderAuth() {
 
 function dashboardView() {
   const recent = state.transactions.slice(0, 5);
+  const statusNotice = state.user.accountStatus !== "active"
+    ? `<p class="error">Account status: ${state.user.accountStatus}. Outgoing operations are restricted.</p>`
+    : "";
 
   return `
     <h2>Hi, ${state.user.fullName}</h2>
     <p class="muted">Role: ${state.user.role}</p>
+    ${statusNotice}
     <p class="balance">${money(state.user.balance)}</p>
     <p class="muted">Available balance</p>
     <h3 style="margin-top: 18px;">Recent activity</h3>
@@ -244,6 +248,12 @@ function balanceView() {
 }
 
 function transferView() {
+  if (state.user.accountStatus !== "active") {
+    return `
+      <h2>Transfer</h2>
+      <p class="error">Transfers are unavailable while your account is ${state.user.accountStatus}.</p>
+    `;
+  }
   const options = state.users
     .map((u) => `<option value="${u.id}">${u.fullName} (${u.email})</option>`)
     .join("");
@@ -315,9 +325,9 @@ function adminView() {
     <h3>Users</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Balance</th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Account Status</th><th>Balance</th></tr></thead>
         <tbody>
-          ${state.adminUsers.map((u) => `<tr><td>${u.fullName}</td><td>${u.email}</td><td>${u.role}</td><td>${u.isActive ? "Active" : "Inactive"}</td><td>${money(u.balance)}</td></tr>`).join("")}
+          ${state.adminUsers.map((u) => `<tr><td>${u.fullName}</td><td>${u.email}</td><td>${u.role}</td><td>${u.accountStatus}</td><td>${money(u.balance)}</td></tr>`).join("")}
         </tbody>
       </table>
     </div>
@@ -354,7 +364,7 @@ function adminView() {
       <div id="admin-role-msg"></div>
     </form>
 
-    <h3 style="margin-top:16px;">Activate or Deactivate User</h3>
+    <h3 style="margin-top:16px;">Account Controls (Freeze / Block)</h3>
     <form id="admin-status-form" class="form-grid">
       <div>
         <label>User</label>
@@ -363,10 +373,11 @@ function adminView() {
         </select>
       </div>
       <div>
-        <label>Status</label>
-        <select name="isActive" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
-          <option value="true">Active</option>
-          <option value="false">Inactive</option>
+        <label>Account Status</label>
+        <select name="accountStatus" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+          <option value="active">active</option>
+          <option value="frozen">frozen</option>
+          <option value="blocked">blocked</option>
         </select>
       </div>
       <button class="btn secondary" type="submit">Update Status</button>
@@ -498,7 +509,7 @@ async function bindEvents() {
       try {
         await api(`/admin/users/${String(data.get("userId") || "")}/status`, {
           method: "PUT",
-          body: { isActive: String(data.get("isActive")) === "true" }
+          body: { accountStatus: String(data.get("accountStatus") || "") }
         });
         await render();
       } catch (err) {
