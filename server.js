@@ -40,6 +40,7 @@ function initDb() {
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('user','admin')),
+      is_active INTEGER NOT NULL DEFAULT 1,
       balance REAL NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
@@ -63,6 +64,11 @@ function initDb() {
       created_at TEXT NOT NULL
     );
   `);
+  const userColumns = db.prepare("PRAGMA table_info(users)").all();
+  const hasIsActive = userColumns.some((col) => col.name === "is_active");
+  if (!hasIsActive) {
+    db.exec("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1");
+  }
 
   const adminEmail = "admin@bank.local";
   const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(adminEmail);
@@ -73,6 +79,7 @@ function initDb() {
       email: adminEmail,
       password_hash: bcrypt.hashSync("admin123", 10),
       role: "admin",
+      is_active: 1,
       balance: 5000,
       created_at: new Date().toISOString()
     };
@@ -105,11 +112,14 @@ function auth(req, res, next) {
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     const user = db
-      .prepare("SELECT id, full_name, email, role, balance, created_at FROM users WHERE id = ?")
+      .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users WHERE id = ?")
       .get(payload.sub);
 
     if (!user) {
       return res.status(401).json({ error: "Invalid session." });
+    }
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Your account is inactive. Contact admin." });
     }
 
     req.user = user;
@@ -218,6 +228,7 @@ app.post("/api/auth/verify", (req, res) => {
     email: pending.email,
     password_hash: pending.password_hash,
     role: "user",
+    is_active: 1,
     balance: 1000,
     created_at: new Date().toISOString()
   };
@@ -247,11 +258,14 @@ app.post("/api/auth/login", (req, res) => {
   const password = String(req.body.password || "");
 
   const row = db
-    .prepare("SELECT id, full_name, email, password_hash, role, balance, created_at FROM users WHERE email = ?")
+    .prepare("SELECT id, full_name, email, password_hash, role, is_active, balance, created_at FROM users WHERE email = ?")
     .get(email);
 
   if (!row || !bcrypt.compareSync(password, row.password_hash)) {
     return res.status(401).json({ error: "Invalid login credentials." });
+  }
+  if (!row.is_active) {
+    return res.status(403).json({ error: "Your account is inactive. Contact admin." });
   }
 
   const safeUser = {
@@ -268,7 +282,7 @@ app.post("/api/auth/login", (req, res) => {
 
 app.get("/api/me", auth, (req, res) => {
   const user = db
-    .prepare("SELECT id, full_name, email, role, balance, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users WHERE id = ?")
     .get(req.user.id);
 
   return res.json({
@@ -277,6 +291,7 @@ app.get("/api/me", auth, (req, res) => {
       fullName: user.full_name,
       email: user.email,
       role: user.role,
+      isActive: Boolean(user.is_active),
       balance: user.balance,
       createdAt: user.created_at
     }
@@ -308,7 +323,7 @@ app.put("/api/me", auth, (req, res) => {
   }
 
   const user = db
-    .prepare("SELECT id, full_name, email, role, balance, created_at FROM users WHERE id = ?")
+    .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users WHERE id = ?")
     .get(req.user.id);
 
   return res.json({
@@ -317,6 +332,7 @@ app.put("/api/me", auth, (req, res) => {
       fullName: user.full_name,
       email: user.email,
       role: user.role,
+      isActive: Boolean(user.is_active),
       balance: user.balance,
       createdAt: user.created_at
     }
@@ -345,10 +361,13 @@ app.post("/api/transfers", auth, (req, res) => {
   }
 
   const fromUser = db.prepare("SELECT id, balance FROM users WHERE id = ?").get(req.user.id);
-  const toUser = db.prepare("SELECT id, email FROM users WHERE id = ?").get(toUserId);
+  const toUser = db.prepare("SELECT id, email, is_active FROM users WHERE id = ?").get(toUserId);
 
   if (!toUser) {
     return res.status(404).json({ error: "Recipient not found." });
+  }
+  if (!toUser.is_active) {
+    return res.status(400).json({ error: "Recipient account is inactive." });
   }
 
   if (fromUser.balance < amount) {
@@ -400,13 +419,14 @@ app.get("/api/transactions", auth, (req, res) => {
 
 app.get("/api/admin/users", auth, requireAdmin, (req, res) => {
   const users = db
-    .prepare("SELECT id, full_name, email, role, balance, created_at FROM users ORDER BY created_at DESC")
+    .prepare("SELECT id, full_name, email, role, is_active, balance, created_at FROM users ORDER BY created_at DESC")
     .all()
     .map((u) => ({
       id: u.id,
       fullName: u.full_name,
       email: u.email,
       role: u.role,
+      isActive: Boolean(u.is_active),
       balance: u.balance,
       createdAt: u.created_at
     }));
@@ -430,6 +450,48 @@ app.put("/api/admin/users/:id/balance", auth, requireAdmin, (req, res) => {
   db.prepare("UPDATE users SET balance = ? WHERE id = ?").run(balance, userId);
 
   return res.json({ message: `Balance updated for ${found.email}.` });
+});
+
+app.put("/api/admin/users/:id/role", auth, requireAdmin, (req, res) => {
+  const userId = String(req.params.id || "").trim();
+  const role = String(req.body.role || "").trim();
+  if (role !== "user" && role !== "admin") {
+    return res.status(400).json({ error: "Role must be user or admin." });
+  }
+
+  const found = db.prepare("SELECT id, email FROM users WHERE id = ?").get(userId);
+  if (!found) return res.status(404).json({ error: "User not found." });
+
+  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, userId);
+  return res.json({ message: `Role updated for ${found.email}.` });
+});
+
+app.put("/api/admin/users/:id/status", auth, requireAdmin, (req, res) => {
+  const userId = String(req.params.id || "").trim();
+  const isActive = req.body.isActive ? 1 : 0;
+  const found = db.prepare("SELECT id, email FROM users WHERE id = ?").get(userId);
+  if (!found) return res.status(404).json({ error: "User not found." });
+  if (req.user.id === userId && !isActive) {
+    return res.status(400).json({ error: "You cannot deactivate your own admin account." });
+  }
+  db.prepare("UPDATE users SET is_active = ? WHERE id = ?").run(isActive, userId);
+  return res.json({ message: `${found.email} is now ${isActive ? "active" : "inactive"}.` });
+});
+
+app.delete("/api/admin/users/:id", auth, requireAdmin, (req, res) => {
+  const userId = String(req.params.id || "").trim();
+  if (req.user.id === userId) {
+    return res.status(400).json({ error: "You cannot delete your own admin account." });
+  }
+  const found = db.prepare("SELECT id, email FROM users WHERE id = ?").get(userId);
+  if (!found) return res.status(404).json({ error: "User not found." });
+
+  db.transaction(() => {
+    db.prepare("DELETE FROM transactions WHERE from_user_id = ? OR to_user_id = ?").run(userId, userId);
+    db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+  })();
+
+  return res.json({ message: `Deleted user ${found.email}.` });
 });
 
 app.get("/api/admin/transactions", auth, requireAdmin, (req, res) => {

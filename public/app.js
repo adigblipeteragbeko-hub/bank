@@ -315,9 +315,9 @@ function adminView() {
     <h3>Users</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Balance</th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Balance</th></tr></thead>
         <tbody>
-          ${state.adminUsers.map((u) => `<tr><td>${u.fullName}</td><td>${u.email}</td><td>${u.role}</td><td>${money(u.balance)}</td></tr>`).join("")}
+          ${state.adminUsers.map((u) => `<tr><td>${u.fullName}</td><td>${u.email}</td><td>${u.role}</td><td>${u.isActive ? "Active" : "Inactive"}</td><td>${money(u.balance)}</td></tr>`).join("")}
         </tbody>
       </table>
     </div>
@@ -333,6 +333,56 @@ function adminView() {
       <div><label>New Balance</label><input type="number" name="balance" step="0.01" min="0" required /></div>
       <button class="btn" type="submit">Update Balance</button>
       <div id="admin-msg"></div>
+    </form>
+
+    <h3 style="margin-top:16px;">Change User Role</h3>
+    <form id="admin-role-form" class="form-grid">
+      <div>
+        <label>User</label>
+        <select name="userId" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+          ${state.adminUsers.map((u) => `<option value="${u.id}">${u.fullName} (${u.email})</option>`).join("")}
+        </select>
+      </div>
+      <div>
+        <label>Role</label>
+        <select name="role" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+          <option value="user">user</option>
+          <option value="admin">admin</option>
+        </select>
+      </div>
+      <button class="btn secondary" type="submit">Update Role</button>
+      <div id="admin-role-msg"></div>
+    </form>
+
+    <h3 style="margin-top:16px;">Activate or Deactivate User</h3>
+    <form id="admin-status-form" class="form-grid">
+      <div>
+        <label>User</label>
+        <select name="userId" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+          ${state.adminUsers.map((u) => `<option value="${u.id}">${u.fullName} (${u.email})</option>`).join("")}
+        </select>
+      </div>
+      <div>
+        <label>Status</label>
+        <select name="isActive" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+          <option value="true">Active</option>
+          <option value="false">Inactive</option>
+        </select>
+      </div>
+      <button class="btn secondary" type="submit">Update Status</button>
+      <div id="admin-status-msg"></div>
+    </form>
+
+    <h3 style="margin-top:16px;">Delete User</h3>
+    <form id="admin-delete-form" class="form-grid">
+      <div>
+        <label>User</label>
+        <select name="userId" required style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+          ${state.adminUsers.map((u) => `<option value="${u.id}">${u.fullName} (${u.email})</option>`).join("")}
+        </select>
+      </div>
+      <button class="btn danger" type="submit">Delete User</button>
+      <div id="admin-delete-msg"></div>
     </form>
 
     <h3 style="margin-top:16px;">All Transactions</h3>
@@ -410,6 +460,64 @@ async function bindEvents() {
           method: "PUT",
           body: { balance: Number(data.get("balance")) }
         });
+        await render();
+      } catch (err) {
+        msg.className = "error";
+        msg.textContent = err.message;
+      }
+    });
+  }
+
+  const adminRoleForm = document.getElementById("admin-role-form");
+  if (adminRoleForm) {
+    adminRoleForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      const msg = document.getElementById("admin-role-msg");
+      msg.textContent = "";
+      try {
+        await api(`/admin/users/${String(data.get("userId") || "")}/role`, {
+          method: "PUT",
+          body: { role: String(data.get("role") || "") }
+        });
+        await render();
+      } catch (err) {
+        msg.className = "error";
+        msg.textContent = err.message;
+      }
+    });
+  }
+
+  const adminStatusForm = document.getElementById("admin-status-form");
+  if (adminStatusForm) {
+    adminStatusForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      const msg = document.getElementById("admin-status-msg");
+      msg.textContent = "";
+      try {
+        await api(`/admin/users/${String(data.get("userId") || "")}/status`, {
+          method: "PUT",
+          body: { isActive: String(data.get("isActive")) === "true" }
+        });
+        await render();
+      } catch (err) {
+        msg.className = "error";
+        msg.textContent = err.message;
+      }
+    });
+  }
+
+  const adminDeleteForm = document.getElementById("admin-delete-form");
+  if (adminDeleteForm) {
+    adminDeleteForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      const msg = document.getElementById("admin-delete-msg");
+      msg.textContent = "";
+      if (!window.confirm("Are you sure you want to permanently delete this user?")) return;
+      try {
+        await api(`/admin/users/${String(data.get("userId") || "")}`, { method: "DELETE" });
         await render();
       } catch (err) {
         msg.className = "error";
